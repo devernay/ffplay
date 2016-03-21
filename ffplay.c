@@ -2298,19 +2298,13 @@ end:
 #endif  /* CONFIG_AVFILTER */
 
 #ifdef AUDIO
-static int audio_thread(void *arg)
+static int audio_thread_iter(VideoState *is, AVFrame *frame)
 {
-    VideoState *is = arg;
-    AVFrame *frame = av_frame_alloc();
-    int ret = 0;
-
-    if (!frame)
-        return AVERROR(ENOMEM);
-
-    do {
+    {
+        int ret = 0;
         int got_frame;
         if ((got_frame = decoder_decode_frame(&is->auddec, frame, NULL)) < 0)
-            goto the_end;
+            return -1;
 
         if (got_frame) {
 #if CONFIG_AVFILTER
@@ -2341,11 +2335,11 @@ static int audio_thread(void *arg)
                     is->last_aserial                    = is->auddec.pkt_serial;
 
                     if ((ret = configure_audio_filters(is, afilters, 1)) < 0)
-                        goto the_end;
+                        return ret;
                 }
 
             if ((ret = av_buffersrc_add_frame(is->in_audio_filter, frame)) < 0)
-                goto the_end;
+                return ret;
 
             while ((ret = av_buffersink_get_frame_flags(is->out_audio_filter, frame, 0)) >= 0) {
                 AVRational tb = is->out_audio_filter->inputs[0]->time_base;
@@ -2354,7 +2348,7 @@ static int audio_thread(void *arg)
 #endif
                 Frame *af;
                 if (!(af = frame_queue_peek_writable(&is->sampq)))
-                    goto the_end;
+                    return -1;
 
                 af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
                 af->pos = av_frame_get_pkt_pos(frame);
@@ -2372,6 +2366,21 @@ static int audio_thread(void *arg)
                 is->auddec.finished = is->auddec.pkt_serial;
 #endif
         }
+        return ret;
+    }
+}
+
+static int audio_thread(void *arg)
+{
+    VideoState *is = arg;
+    AVFrame *frame = av_frame_alloc();
+    int ret = 0;
+
+    if (!frame)
+        return AVERROR(ENOMEM);
+
+    do {
+        ret = audio_thread_iter(is, frame);
     } while (ret >= 0 || ret == AVERROR(EAGAIN) || ret == AVERROR_EOF);
  the_end:
 #if CONFIG_AVFILTER
