@@ -28,7 +28,7 @@
 //#define SUBTITLE
 //#define EXTCLOCK
 //#define FRAMEDROP
-#undef CONFIG_AVFILTER
+//#undef CONFIG_AVFILTER
 #undef CONFIG_RTSP_DEMUXER
 #undef CONFIG_AVDEVICE
 #include <inttypes.h>
@@ -352,6 +352,7 @@ typedef struct VideoState {
     int vfilter_idx;
     AVFilterContext *in_video_filter;   // the first filter in the video chain
     AVFilterContext *out_video_filter;  // the last filter in the video chain
+    AVFilterGraph *vgraph;              // video filter graph
 #ifdef AUDIO
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
@@ -2108,7 +2109,7 @@ fail:
     return ret;
 }
 
-static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const char *vfilters, AVFrame *frame)
+static int configure_video_filters(VideoState *is, const char *vfilters, AVFrame *frame)
 {
     static const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE };
     char sws_flags_str[512] = "";
@@ -2119,6 +2120,10 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     AVRational fr = av_guess_frame_rate(is->ic, is->video_st, NULL);
     AVDictionaryEntry *e = NULL;
 
+    avfilter_graph_free(&is->vgraph);
+    if (!(is->vgraph = avfilter_graph_alloc()))
+        return AVERROR(ENOMEM);
+
     while ((e = av_dict_get(sws_dict, "", e, AV_DICT_IGNORE_SUFFIX))) {
         if (!strcmp(e->key, "sws_flags")) {
             av_strlcatf(sws_flags_str, sizeof(sws_flags_str), "%s=%s:", "flags", e->value);
@@ -2128,7 +2133,7 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     if (strlen(sws_flags_str))
         sws_flags_str[strlen(sws_flags_str)-1] = '\0';
 
-    graph->scale_sws_opts = av_strdup(sws_flags_str);
+    is->vgraph->scale_sws_opts = av_strdup(sws_flags_str);
 
     snprintf(buffersrc_args, sizeof(buffersrc_args),
              "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
@@ -2141,12 +2146,12 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     if ((ret = avfilter_graph_create_filter(&filt_src,
                                             avfilter_get_by_name("buffer"),
                                             "ffplay_buffer", buffersrc_args, NULL,
-                                            graph)) < 0)
+                                            is->vgraph)) < 0)
         goto fail;
 
     ret = avfilter_graph_create_filter(&filt_out,
                                        avfilter_get_by_name("buffersink"),
-                                       "ffplay_buffersink", NULL, NULL, graph);
+                                       "ffplay_buffersink", NULL, NULL, is->vgraph);
     if (ret < 0)
         goto fail;
 
@@ -2162,7 +2167,7 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
                                                                              \
     ret = avfilter_graph_create_filter(&filt_ctx,                            \
                                        avfilter_get_by_name(name),           \
-                                       "ffplay_" name, arg, NULL, graph);    \
+                                       "ffplay_" name, arg, NULL, is->vgraph);    \
     if (ret < 0)                                                             \
         goto fail;                                                           \
                                                                              \
@@ -2194,13 +2199,15 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
         }
     }
 
-    if ((ret = configure_filtergraph(graph, vfilters, filt_src, last_filter)) < 0)
+    if ((ret = configure_filtergraph(is->vgraph, vfilters, filt_src, last_filter)) < 0)
         goto fail;
 
     is->in_video_filter  = filt_src;
     is->out_video_filter = filt_out;
 
 fail:
+    if (ret < 0)
+        avfilter_graph_free(&is->vgraph);
     return ret;
 }
 
@@ -2394,24 +2401,14 @@ static int video_thread(void *arg)
     AVRational frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
 
 #if CONFIG_AVFILTER
-    AVFilterGraph *graph = avfilter_graph_alloc();
-    AVFilterContext *filt_out = NULL, *filt_in = NULL;
     int last_w = 0;
     int last_h = 0;
     enum AVPixelFormat last_format = -2;
     int last_serial = -1;
     int last_vfilter_idx = 0;
-    if (!graph) {
-        av_frame_free(&frame);
-        return AVERROR(ENOMEM);
-    }
-
 #endif
 
     if (!frame) {
-#if CONFIG_AVFILTER
-        avfilter_graph_free(&graph);
-#endif
         return AVERROR(ENOMEM);
     }
 
@@ -2434,33 +2431,29 @@ static int video_thread(void *arg)
                    (const char *)av_x_if_null(av_get_pix_fmt_name(last_format), "none"), last_serial,
                    frame->width, frame->height,
                    (const char *)av_x_if_null(av_get_pix_fmt_name(frame->format), "none"), is->viddec.pkt_serial);
-            avfilter_graph_free(&graph);
-            graph = avfilter_graph_alloc();
-            if ((ret = configure_video_filters(graph, is, vfilters_list ? vfilters_list[is->vfilter_idx] : NULL, frame)) < 0) {
+            if ((ret = configure_video_filters(is, vfilters_list ? vfilters_list[is->vfilter_idx] : NULL, frame)) < 0) {
                 SDL_Event event;
                 event.type = FF_QUIT_EVENT;
                 event.user.data1 = is;
                 SDL_PushEvent(&event);
                 goto the_end;
             }
-            filt_in  = is->in_video_filter;
-            filt_out = is->out_video_filter;
             last_w = frame->width;
             last_h = frame->height;
             last_format = frame->format;
             last_serial = is->viddec.pkt_serial;
             last_vfilter_idx = is->vfilter_idx;
-            frame_rate = filt_out->inputs[0]->frame_rate;
+            frame_rate = is->out_video_filter->inputs[0]->frame_rate;
         }
 
-        ret = av_buffersrc_add_frame(filt_in, frame);
+        ret = av_buffersrc_add_frame(is->in_video_filter, frame);
         if (ret < 0)
             goto the_end;
 
         while (ret >= 0) {
             is->frame_last_returned_time = av_gettime_relative() / 1000000.0;
 
-            ret = av_buffersink_get_frame_flags(filt_out, frame, 0);
+            ret = av_buffersink_get_frame_flags(is->out_video_filter, frame, 0);
             if (ret < 0) {
                 if (ret == AVERROR_EOF)
                     is->viddec.finished = is->viddec.pkt_serial;
@@ -2471,7 +2464,7 @@ static int video_thread(void *arg)
             is->frame_last_filter_delay = av_gettime_relative() / 1000000.0 - is->frame_last_returned_time;
             if (fabs(is->frame_last_filter_delay) > AV_NOSYNC_THRESHOLD / 10.0)
                 is->frame_last_filter_delay = 0;
-            tb = filt_out->inputs[0]->time_base;
+            tb = is->out_video_filter->inputs[0]->time_base;
 #endif
             duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
@@ -2486,7 +2479,7 @@ static int video_thread(void *arg)
     }
  the_end:
 #if CONFIG_AVFILTER
-    avfilter_graph_free(&graph);
+    avfilter_graph_free(&is->vgraph);
 #endif
     av_frame_free(&frame);
     return 0;
