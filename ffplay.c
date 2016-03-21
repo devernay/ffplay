@@ -346,6 +346,7 @@ typedef struct VideoState {
 
     char *filename;
     int width, height, xleft, ytop;
+    AVRational frame_rate;
     int step;
 
 #if CONFIG_AVFILTER
@@ -353,6 +354,11 @@ typedef struct VideoState {
     AVFilterContext *in_video_filter;   // the first filter in the video chain
     AVFilterContext *out_video_filter;  // the last filter in the video chain
     AVFilterGraph *vgraph;              // video filter graph
+    int last_w;
+    int last_h;
+    enum AVPixelFormat last_format;
+    int last_vserial;
+    int last_vfilter_idx;
 #ifdef AUDIO
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
@@ -2394,25 +2400,17 @@ static int video_thread(void *arg)
 {
     VideoState *is = arg;
     AVFrame *frame = av_frame_alloc();
-    double pts;
-    double duration;
-    int ret;
-    AVRational tb = is->video_st->time_base;
-    AVRational frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
-
-#if CONFIG_AVFILTER
-    int last_w = 0;
-    int last_h = 0;
-    enum AVPixelFormat last_format = -2;
-    int last_serial = -1;
-    int last_vfilter_idx = 0;
-#endif
 
     if (!frame) {
         return AVERROR(ENOMEM);
     }
 
     for (;;) {
+        double pts;
+        double duration;
+        int ret;
+        AVRational tb;
+
         ret = get_video_frame(is, frame);
         if (ret < 0)
             goto the_end;
@@ -2420,15 +2418,15 @@ static int video_thread(void *arg)
             continue;
 
 #if CONFIG_AVFILTER
-        if (   last_w != frame->width
-            || last_h != frame->height
-            || last_format != frame->format
-            || last_serial != is->viddec.pkt_serial
-            || last_vfilter_idx != is->vfilter_idx) {
+        if (   is->last_w != frame->width
+            || is->last_h != frame->height
+            || is->last_format != frame->format
+            || is->last_vserial != is->viddec.pkt_serial
+            || is->last_vfilter_idx != is->vfilter_idx) {
             av_log(NULL, AV_LOG_DEBUG,
                    "Video frame changed from size:%dx%d format:%s serial:%d to size:%dx%d format:%s serial:%d\n",
-                   last_w, last_h,
-                   (const char *)av_x_if_null(av_get_pix_fmt_name(last_format), "none"), last_serial,
+                   is->last_w, is->last_h,
+                   (const char *)av_x_if_null(av_get_pix_fmt_name(is->last_format), "none"), is->last_vserial,
                    frame->width, frame->height,
                    (const char *)av_x_if_null(av_get_pix_fmt_name(frame->format), "none"), is->viddec.pkt_serial);
             if ((ret = configure_video_filters(is, vfilters_list ? vfilters_list[is->vfilter_idx] : NULL, frame)) < 0) {
@@ -2438,12 +2436,12 @@ static int video_thread(void *arg)
                 SDL_PushEvent(&event);
                 goto the_end;
             }
-            last_w = frame->width;
-            last_h = frame->height;
-            last_format = frame->format;
-            last_serial = is->viddec.pkt_serial;
-            last_vfilter_idx = is->vfilter_idx;
-            frame_rate = is->out_video_filter->inputs[0]->frame_rate;
+            is->last_w = frame->width;
+            is->last_h = frame->height;
+            is->last_format = frame->format;
+            is->last_vserial = is->viddec.pkt_serial;
+            is->last_vfilter_idx = is->vfilter_idx;
+            is->frame_rate = is->out_video_filter->inputs[0]->frame_rate;
         }
 
         ret = av_buffersrc_add_frame(is->in_video_filter, frame);
@@ -2465,8 +2463,10 @@ static int video_thread(void *arg)
             if (fabs(is->frame_last_filter_delay) > AV_NOSYNC_THRESHOLD / 10.0)
                 is->frame_last_filter_delay = 0;
             tb = is->out_video_filter->inputs[0]->time_base;
+#else
+            tb = is->video_st->time_base;
 #endif
-            duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
+            duration = (is->frame_rate.num && is->frame_rate.den ? av_q2d((AVRational){is->frame_rate.den, is->frame_rate.num}) : 0);
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
             ret = queue_picture(is, frame, pts, duration, av_frame_get_pkt_pos(frame), is->viddec.pkt_serial);
             av_frame_unref(frame);
@@ -2994,6 +2994,16 @@ static int stream_component_open(VideoState *is, int stream_index)
 
         is->viddec_width  = avctx->width;
         is->viddec_height = avctx->height;
+
+        is->frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
+
+#if CONFIG_AVFILTER
+        is->last_w = 0;
+        is->last_h = 0;
+        is->last_format = -2;
+        is->last_vserial = -1;
+        is->last_vfilter_idx = 0;
+#endif
 
         decoder_init(&is->viddec, avctx, &is->videoq, is->continue_read_thread);
         if ((ret = decoder_start(&is->viddec, video_thread, is)) < 0)
