@@ -2503,20 +2503,19 @@ static int video_thread(void *arg)
 }
 
 #ifdef SUBTITLE
-static int subtitle_thread(void *arg)
+static int subtitle_thread_iter(VideoState *is)
 {
-    VideoState *is = arg;
     Frame *sp;
     int got_subtitle;
     double pts;
     int i;
 
-    for (;;) {
+    {
         if (!(sp = frame_queue_peek_writable(&is->subpq)))
-            return 0;
+            return -1;
 
         if ((got_subtitle = decoder_decode_frame(&is->subdec, NULL, &sp->sub)) < 0)
-            break;
+            return -1;
 
         pts = 0;
 
@@ -2568,6 +2567,20 @@ static int subtitle_thread(void *arg)
             avsubtitle_free(&sp->sub);
         }
     }
+    return 0;
+}
+
+static int subtitle_thread(void *arg)
+{
+    VideoState *is = arg;
+
+    for (;;) {
+        int ret = subtitle_thread_iter(is);
+
+        if (ret < 0)
+            goto the_end;
+    }
+ the_end:
     return 0;
 }
 #endif
