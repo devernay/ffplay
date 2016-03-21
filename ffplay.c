@@ -2396,26 +2396,20 @@ static int decoder_start(Decoder *d, int (*fn)(void *), void *arg)
     return 0;
 }
 
-static int video_thread(void *arg)
+static int video_thread_iter(VideoState *is, AVFrame *frame)
 {
-    VideoState *is = arg;
-    AVFrame *frame = av_frame_alloc();
-
-    if (!frame) {
-        return AVERROR(ENOMEM);
-    }
-
-    for (;;) {
+    {
         double pts;
         double duration;
         int ret;
         AVRational tb;
 
-        ret = get_video_frame(is, frame);
-        if (ret < 0)
-            goto the_end;
-        if (!ret)
-            continue;
+        ret = 0;
+        while (!ret) {
+            ret = get_video_frame(is, frame);
+            if (ret < 0)
+                return ret;
+        }
 
 #if CONFIG_AVFILTER
         if (   is->last_w != frame->width
@@ -2434,7 +2428,7 @@ static int video_thread(void *arg)
                 event.type = FF_QUIT_EVENT;
                 event.user.data1 = is;
                 SDL_PushEvent(&event);
-                goto the_end;
+                return ret;
             }
             is->last_w = frame->width;
             is->last_h = frame->height;
@@ -2446,7 +2440,7 @@ static int video_thread(void *arg)
 
         ret = av_buffersrc_add_frame(is->in_video_filter, frame);
         if (ret < 0)
-            goto the_end;
+            return ret;
 
         while (ret >= 0) {
             is->frame_last_returned_time = av_gettime_relative() / 1000000.0;
@@ -2473,6 +2467,23 @@ static int video_thread(void *arg)
 #if CONFIG_AVFILTER
         }
 #endif
+
+        return ret;
+    }
+}
+
+static int video_thread(void *arg)
+{
+    VideoState *is = arg;
+    AVFrame *frame = av_frame_alloc();
+
+    if (!frame) {
+        return AVERROR(ENOMEM);
+    }
+
+    
+    for (;;) {
+        int ret = video_thread_iter(is, frame);
 
         if (ret < 0)
             goto the_end;
