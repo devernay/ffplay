@@ -30,3 +30,9 @@
 
 # Debug files
 *.dSYM/
+
+build
+DerivedData
+ffplay
+*.xcworkspace
+*.xcuserdatad
