@@ -1,0 +1,1417 @@
+--- ffplay-3.0.2.c	2016-03-21 10:57:18.000000000 +0100
++++ ffplay-3.0.2-ifdefd.c	2016-03-21 11:17:36.000000000 +0100
+@@ -24,6 +24,13 @@
+  */
+ 
+ #include "config.h"
++//#define AUDIO
++//#define SUBTITLE
++//#define EXTCLOCK
++//#define FRAMEDROP
++#undef CONFIG_AVFILTER
++#undef CONFIG_RTSP_DEMUXER
++#undef CONFIG_AVDEVICE
+ #include <inttypes.h>
+ #include <math.h>
+ #include <limits.h>
+@@ -65,9 +72,12 @@
+ 
+ #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
+ #define MIN_FRAMES 25
++#ifdef EXTCLOCK
+ #define EXTERNAL_CLOCK_MIN_FRAMES 2
+ #define EXTERNAL_CLOCK_MAX_FRAMES 10
++#endif
+ 
++#ifdef AUDIO
+ /* Minimum SDL audio buffer size, in samples. */
+ #define SDL_AUDIO_MIN_BUFFER_SIZE 512
+ /* Calculate actual buffer size keeping in mind not cause too frequent audio callbacks */
+@@ -75,6 +85,7 @@
+ 
+ /* Step size for volume control */
+ #define SDL_VOLUME_STEP (SDL_MIX_MAXVOLUME / 50)
++#endif
+ 
+ /* no AV sync correction is done if below the minimum AV sync threshold */
+ #define AV_SYNC_THRESHOLD_MIN 0.04
+@@ -85,23 +96,31 @@
+ /* no AV correction is done if too big error */
+ #define AV_NOSYNC_THRESHOLD 10.0
+ 
++#ifdef AUDIO
+ /* maximum audio speed change to get correct sync */
+ #define SAMPLE_CORRECTION_PERCENT_MAX 10
++#endif
+ 
++#ifdef EXTCLOCK
+ /* external clock speed adjustment constants for realtime sources based on buffer fullness */
+ #define EXTERNAL_CLOCK_SPEED_MIN  0.900
+ #define EXTERNAL_CLOCK_SPEED_MAX  1.010
+ #define EXTERNAL_CLOCK_SPEED_STEP 0.001
++#endif
+ 
++#ifdef AUDIO
+ /* we use about AUDIO_DIFF_AVG_NB A-V differences to make the average */
+ #define AUDIO_DIFF_AVG_NB   20
++#endif
+ 
+ /* polls for possible required screen refresh at least this often, should be less than 1/fps */
+ #define REFRESH_RATE 0.01
+ 
++#ifdef AUDIO
+ /* NOTE: the size must be big enough to compensate the hardware audio buffersize size */
+ /* TODO: We assume that a decoded and resampled frame fits into this buffer */
+ #define SAMPLE_ARRAY_SIZE (8 * 65536)
++#endif
+ 
+ #define CURSOR_HIDE_DELAY 1000000
+ 
+@@ -128,6 +147,7 @@
+ #define SAMPLE_QUEUE_SIZE 9
+ #define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
+ 
++#ifdef AUDIO
+ typedef struct AudioParams {
+     int freq;
+     int channels;
+@@ -136,6 +156,7 @@
+     int frame_size;
+     int bytes_per_sec;
+ } AudioParams;
++#endif
+ 
+ typedef struct Clock {
+     double pts;           /* clock base */
+@@ -150,8 +171,10 @@
+ /* Common struct for handling all types of decoded data and allocated render buffers. */
+ typedef struct Frame {
+     AVFrame *frame;
++#ifdef SUBTITLE
+     AVSubtitle sub;
+     AVSubtitleRect **subrects;  /* rescaled subtitle rectangles in yuva */
++#endif
+     int serial;
+     double pts;           /* presentation timestamp for the frame */
+     double duration;      /* estimated duration of the frame */
+@@ -178,9 +201,13 @@
+ } FrameQueue;
+ 
+ enum {
++#ifdef AUDIO
+     AV_SYNC_AUDIO_MASTER, /* default choice */
++#endif
+     AV_SYNC_VIDEO_MASTER,
++#ifdef EXTCLOCK
+     AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
++#endif
+ };
+ 
+ typedef struct Decoder {
+@@ -215,13 +242,21 @@
+     AVFormatContext *ic;
+     int realtime;
+ 
++#ifdef AUDIO
+     Clock audclk;
++#endif
+     Clock vidclk;
++#ifdef EXTCLOCK
+     Clock extclk;
++#endif
+ 
+     FrameQueue pictq;
++#ifdef SUBTITLE
+     FrameQueue subpq;
++#endif
++#ifdef AUDIO
+     FrameQueue sampq;
++#endif
+ 
+     Decoder auddec;
+     Decoder viddec;
+@@ -230,10 +265,13 @@
+     int viddec_width;
+     int viddec_height;
+ 
++#ifdef AUDIO
+     int audio_stream;
++#endif
+ 
+     int av_sync_type;
+ 
++#ifdef AUDIO
+     double audio_clock;
+     int audio_clock_serial;
+     double audio_diff_cum; /* used for AV difference average computation */
+@@ -258,12 +296,22 @@
+ #endif
+     struct AudioParams audio_tgt;
+     struct SwrContext *swr_ctx;
++#endif
++#ifdef FRAMEDROP
+     int frame_drops_early;
+     int frame_drops_late;
++#endif
+ 
+     enum ShowMode {
+-        SHOW_MODE_NONE = -1, SHOW_MODE_VIDEO = 0, SHOW_MODE_WAVES, SHOW_MODE_RDFT, SHOW_MODE_NB
++        SHOW_MODE_NONE = -1,
++        SHOW_MODE_VIDEO = 0,
++#ifdef AUDIO                
++        SHOW_MODE_WAVES,
++        SHOW_MODE_RDFT,
++#endif
++        SHOW_MODE_NB
+     } show_mode;
++#ifdef AUDIO
+     int16_t sample_array[SAMPLE_ARRAY_SIZE];
+     int sample_array_index;
+     int last_i_start;
+@@ -272,10 +320,13 @@
+     FFTSample *rdft_data;
+     int xpos;
+     double last_vis_time;
++#endif
+ 
++#ifdef SUBTITLE
+     int subtitle_stream;
+     AVStream *subtitle_st;
+     PacketQueue subtitleq;
++#endif
+ 
+     double frame_timer;
+     double frame_last_returned_time;
+@@ -287,7 +338,9 @@
+ #if !CONFIG_AVFILTER
+     struct SwsContext *img_convert_ctx;
+ #endif
++#ifdef SUBTITLE
+     struct SwsContext *sub_convert_ctx;
++#endif
+     SDL_Rect last_display_rect;
+     int eof;
+ 
+@@ -299,12 +352,23 @@
+     int vfilter_idx;
+     AVFilterContext *in_video_filter;   // the first filter in the video chain
+     AVFilterContext *out_video_filter;  // the last filter in the video chain
++#ifdef AUDIO
+     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
+     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
+     AVFilterGraph *agraph;              // audio filter graph
+ #endif
++#endif
+ 
++#if 0
+     int last_video_stream, last_audio_stream, last_subtitle_stream;
++#endif
++    int last_video_stream;
++#ifdef AUDIO
++    int last_audio_stream;
++#endif
++#ifdef SUBTITLE
++    int last_subtitle_stream;
++#endif
+ 
+     SDL_cond *continue_read_thread;
+ } VideoState;
+@@ -319,14 +383,22 @@
+ static int default_height = 480;
+ static int screen_width  = 0;
+ static int screen_height = 0;
++#ifdef AUDIO
+ static int audio_disable;
++#endif
+ static int video_disable;
++#ifdef SUBTITLE
+ static int subtitle_disable;
++#endif
+ static const char* wanted_stream_spec[AVMEDIA_TYPE_NB] = {0};
+ static int seek_by_bytes = -1;
+ static int display_disable;
+ static int show_status = 1;
++#ifdef AUDIO
+ static int av_sync_type = AV_SYNC_AUDIO_MASTER;
++#else
++static int av_sync_type = AV_SYNC_VIDEO_MASTER;
++#endif
+ static int64_t start_time = AV_NOPTS_VALUE;
+ static int64_t duration = AV_NOPTS_VALUE;
+ static int fast = 0;
+@@ -337,11 +409,17 @@
+ static int exit_on_keydown;
+ static int exit_on_mousedown;
+ static int loop = 1;
++#ifdef FRAMEDROP
+ static int framedrop = -1;
++#endif
+ static int infinite_buffer = -1;
+ static enum ShowMode show_mode = SHOW_MODE_NONE;
++#ifdef AUDIO
+ static const char *audio_codec_name;
++#endif
++#ifdef SUBTITLE
+ static const char *subtitle_codec_name;
++#endif
+ static const char *video_codec_name;
+ double rdftspeed = 0.02;
+ static int64_t cursor_last_shown;
+@@ -349,13 +427,17 @@
+ #if CONFIG_AVFILTER
+ static const char **vfilters_list = NULL;
+ static int nb_vfilters = 0;
++#ifdef AUDIO
+ static char *afilters = NULL;
+ #endif
++#endif
+ static int autorotate = 1;
+ 
+ /* current context */
+ static int is_full_screen;
++#ifdef AUDIO
+ static int64_t audio_callback_time;
++#endif
+ 
+ static AVPacket flush_pkt;
+ 
+@@ -373,6 +455,7 @@
+ }
+ #endif
+ 
++#ifdef AUDIO
+ static inline
+ int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
+                    enum AVSampleFormat fmt2, int64_t channel_count2)
+@@ -392,6 +475,7 @@
+     else
+         return 0;
+ }
++#endif
+ 
+ static void free_picture(Frame *vp);
+ 
+@@ -585,6 +669,9 @@
+         switch (d->avctx->codec_type) {
+             case AVMEDIA_TYPE_VIDEO:
+                 ret = avcodec_decode_video2(d->avctx, frame, &got_frame, &d->pkt_temp);
++#ifdef DEBUG
++                printf("frame dts=%d pts=%d %s\n", (int)frame->pkt_dts, (int)frame->pkt_pts, got_frame ? "decoded!" : "");
++#endif
+                 if (got_frame) {
+                     if (decoder_reorder_pts == -1) {
+                         frame->pts = av_frame_get_best_effort_timestamp(frame);
+@@ -595,6 +682,7 @@
+                     }
+                 }
+                 break;
++#ifdef AUDIO
+             case AVMEDIA_TYPE_AUDIO:
+                 ret = avcodec_decode_audio4(d->avctx, frame, &got_frame, &d->pkt_temp);
+                 if (got_frame) {
+@@ -611,9 +699,14 @@
+                     }
+                 }
+                 break;
++#endif
++#ifdef SUBTITLE
+             case AVMEDIA_TYPE_SUBTITLE:
+                 ret = avcodec_decode_subtitle2(d->avctx, sub, &got_frame, &d->pkt_temp);
+                 break;
++#endif
++            default:
++                break;
+         }
+ 
+         if (ret < 0) {
+@@ -646,14 +739,18 @@
+ 
+ static void frame_queue_unref_item(Frame *vp)
+ {
++#ifdef SUBTITLE
+     int i;
+     for (i = 0; i < vp->sub.num_rects; i++) {
+         av_freep(&vp->subrects[i]->data[0]);
+         av_freep(&vp->subrects[i]);
+     }
+     av_freep(&vp->subrects);
++#endif
+     av_frame_unref(vp->frame);
++#ifdef SUBTITLE
+     avsubtitle_free(&vp->sub);
++#endif
+ }
+ 
+ static int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_last)
+@@ -728,6 +825,7 @@
+     return &f->queue[f->windex];
+ }
+ 
++#ifdef AUDIO
+ static Frame *frame_queue_peek_readable(FrameQueue *f)
+ {
+     /* wait until we have a readable a new frame */
+@@ -743,6 +841,7 @@
+ 
+     return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
+ }
++#endif
+ 
+ static void frame_queue_push(FrameQueue *f)
+ {
+@@ -851,6 +950,7 @@
+                    color, update);
+ }
+ 
++#ifdef SUBTITLE
+ #define ALPHA_BLEND(a, oldp, newp, s)\
+ ((((oldp << s) * (255 - (a))) + (newp * (a))) / (255 << s))
+ 
+@@ -900,6 +1000,7 @@
+         cr += linesize[2] - dstw/2;
+     }
+ }
++#endif
+ 
+ static void free_picture(Frame *vp)
+ {
+@@ -943,12 +1044,17 @@
+ static void video_image_display(VideoState *is)
+ {
+     Frame *vp;
++#ifdef SUBTITLE
+     Frame *sp;
++#endif
+     SDL_Rect rect;
++#ifdef SUBTITLE
+     int i;
++#endif
+ 
+     vp = frame_queue_peek(&is->pictq);
+     if (vp->bmp) {
++#ifdef SUBTITLE
+         if (is->subtitle_st) {
+             if (frame_queue_nb_remaining(&is->subpq) > 0) {
+                 sp = frame_queue_peek(&is->subpq);
+@@ -975,6 +1081,7 @@
+                 }
+             }
+         }
++#endif
+ 
+         calculate_display_rect(&rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
+ 
+@@ -988,6 +1095,7 @@
+     }
+ }
+ 
++#ifdef AUDIO
+ static inline int compute_mod(int a, int b)
+ {
+     return a < 0 ? a%b + b : a%b;
+@@ -1136,6 +1244,7 @@
+             s->xpos= s->xleft;
+     }
+ }
++#endif
+ 
+ static void stream_component_close(VideoState *is, int stream_index)
+ {
+@@ -1148,6 +1257,7 @@
+ 
+     switch (avctx->codec_type) {
+     case AVMEDIA_TYPE_AUDIO:
++#ifdef AUDIO
+         decoder_abort(&is->auddec, &is->sampq);
+         SDL_CloseAudio();
+         decoder_destroy(&is->auddec);
+@@ -1162,14 +1272,17 @@
+             is->rdft = NULL;
+             is->rdft_bits = 0;
+         }
++#endif
+         break;
+     case AVMEDIA_TYPE_VIDEO:
+         decoder_abort(&is->viddec, &is->pictq);
+         decoder_destroy(&is->viddec);
+         break;
+     case AVMEDIA_TYPE_SUBTITLE:
++#ifdef SUBTITLE
+         decoder_abort(&is->subdec, &is->subpq);
+         decoder_destroy(&is->subdec);
++#endif
+         break;
+     default:
+         break;
+@@ -1179,16 +1292,20 @@
+     avcodec_close(avctx);
+     switch (avctx->codec_type) {
+     case AVMEDIA_TYPE_AUDIO:
++#ifdef AUDIO
+         is->audio_st = NULL;
+         is->audio_stream = -1;
++#endif
+         break;
+     case AVMEDIA_TYPE_VIDEO:
+         is->video_st = NULL;
+         is->video_stream = -1;
+         break;
+     case AVMEDIA_TYPE_SUBTITLE:
++#ifdef SUBTITLE
+         is->subtitle_st = NULL;
+         is->subtitle_stream = -1;
++#endif
+         break;
+     default:
+         break;
+@@ -1202,28 +1319,42 @@
+     SDL_WaitThread(is->read_tid, NULL);
+ 
+     /* close each stream */
++#ifdef AUDIO
+     if (is->audio_stream >= 0)
+         stream_component_close(is, is->audio_stream);
++#endif
+     if (is->video_stream >= 0)
+         stream_component_close(is, is->video_stream);
++#ifdef SUBTITLE
+     if (is->subtitle_stream >= 0)
+         stream_component_close(is, is->subtitle_stream);
++#endif
+ 
+     avformat_close_input(&is->ic);
+ 
+     packet_queue_destroy(&is->videoq);
++#ifdef AUDIO
+     packet_queue_destroy(&is->audioq);
++#endif
++#ifdef SUBTITLE
+     packet_queue_destroy(&is->subtitleq);
++#endif
+ 
+     /* free all pictures */
+     frame_queue_destory(&is->pictq);
++#ifdef AUDIO
+     frame_queue_destory(&is->sampq);
++#endif
++#ifdef SUBTITLE
+     frame_queue_destory(&is->subpq);
++#endif
+     SDL_DestroyCond(is->continue_read_thread);
+ #if !CONFIG_AVFILTER
+     sws_freeContext(is->img_convert_ctx);
+ #endif
++#ifdef SUBTITLE
+     sws_freeContext(is->sub_convert_ctx);
++#endif
+     av_free(is->filename);
+     av_free(is);
+ }
+@@ -1304,8 +1435,10 @@
+ {
+     if (!screen)
+         video_open(is, 0, NULL);
++#ifdef AUDIO
+     if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO)
+         video_audio_display(is);
++#endif
+     else if (is->video_st)
+         video_image_display(is);
+ }
+@@ -1336,11 +1469,13 @@
+     set_clock_at(c, pts, serial, time);
+ }
+ 
++#ifdef EXTCLOCK
+ static void set_clock_speed(Clock *c, double speed)
+ {
+     set_clock(c, get_clock(c), c->serial);
+     c->speed = speed;
+ }
++#endif
+ 
+ static void init_clock(Clock *c, int *queue_serial)
+ {
+@@ -1350,6 +1485,7 @@
+     set_clock(c, NAN, -1);
+ }
+ 
++#ifdef EXTCLOCK
+ static void sync_clock_to_slave(Clock *c, Clock *slave)
+ {
+     double clock = get_clock(c);
+@@ -1357,20 +1493,32 @@
+     if (!isnan(slave_clock) && (isnan(clock) || fabs(clock - slave_clock) > AV_NOSYNC_THRESHOLD))
+         set_clock(c, slave_clock, slave->serial);
+ }
++#endif
+ 
+ static int get_master_sync_type(VideoState *is) {
+     if (is->av_sync_type == AV_SYNC_VIDEO_MASTER) {
+         if (is->video_st)
+             return AV_SYNC_VIDEO_MASTER;
++#ifdef AUDIO
+         else
+             return AV_SYNC_AUDIO_MASTER;
+     } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER) {
+         if (is->audio_st)
+             return AV_SYNC_AUDIO_MASTER;
++#endif
++#ifdef EXTCLOCK
+         else
+             return AV_SYNC_EXTERNAL_CLOCK;
++#else
++        else
++            return AV_SYNC_VIDEO_MASTER;
++#endif
+     } else {
++#ifdef EXTCLOCK
+         return AV_SYNC_EXTERNAL_CLOCK;
++#else
++        return AV_SYNC_VIDEO_MASTER;
++#endif
+     }
+ }
+ 
+@@ -1383,22 +1531,35 @@
+         case AV_SYNC_VIDEO_MASTER:
+             val = get_clock(&is->vidclk);
+             break;
++#ifdef AUDIO
+         case AV_SYNC_AUDIO_MASTER:
+             val = get_clock(&is->audclk);
+             break;
++#endif
+         default:
++#ifdef EXTCLOCK
+             val = get_clock(&is->extclk);
++#else
++            val = get_clock(&is->vidclk);
++#endif
+             break;
+     }
+     return val;
+ }
+ 
++#ifdef EXTCLOCK
+ static void check_external_clock_speed(VideoState *is) {
+-   if (is->video_stream >= 0 && is->videoq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES ||
+-       is->audio_stream >= 0 && is->audioq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES) {
++   if (is->video_stream >= 0 && is->videoq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES
++#ifdef AUDIO
++       || is->audio_stream >= 0 && is->audioq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES
++#endif
++       ) {
+        set_clock_speed(&is->extclk, FFMAX(EXTERNAL_CLOCK_SPEED_MIN, is->extclk.speed - EXTERNAL_CLOCK_SPEED_STEP));
+-   } else if ((is->video_stream < 0 || is->videoq.nb_packets > EXTERNAL_CLOCK_MAX_FRAMES) &&
+-              (is->audio_stream < 0 || is->audioq.nb_packets > EXTERNAL_CLOCK_MAX_FRAMES)) {
++   } else if ((is->video_stream < 0 || is->videoq.nb_packets > EXTERNAL_CLOCK_MAX_FRAMES)
++#ifdef AUDIO
++              && (is->audio_stream < 0 || is->audioq.nb_packets > EXTERNAL_CLOCK_MAX_FRAMES)
++#endif
++              ) {
+        set_clock_speed(&is->extclk, FFMIN(EXTERNAL_CLOCK_SPEED_MAX, is->extclk.speed + EXTERNAL_CLOCK_SPEED_STEP));
+    } else {
+        double speed = is->extclk.speed;
+@@ -1406,6 +1567,7 @@
+            set_clock_speed(&is->extclk, speed + EXTERNAL_CLOCK_SPEED_STEP * (1.0 - speed) / fabs(1.0 - speed));
+    }
+ }
++#endif
+ 
+ /* seek in the stream */
+ static void stream_seek(VideoState *is, int64_t pos, int64_t rel, int seek_by_bytes)
+@@ -1431,8 +1593,18 @@
+         }
+         set_clock(&is->vidclk, get_clock(&is->vidclk), is->vidclk.serial);
+     }
++#ifdef EXTCLOCK
+     set_clock(&is->extclk, get_clock(&is->extclk), is->extclk.serial);
+-    is->paused = is->audclk.paused = is->vidclk.paused = is->extclk.paused = !is->paused;
++#endif
++    is->paused =
++#ifdef AUDIO
++    is->audclk.paused =
++#endif
++    is->vidclk.paused =
++#ifdef EXTCLOCK
++    is->extclk.paused =
++#endif
++        !is->paused;
+ }
+ 
+ static void toggle_pause(VideoState *is)
+@@ -1441,6 +1613,7 @@
+     is->step = 0;
+ }
+ 
++#ifdef AUDIO
+ static void toggle_mute(VideoState *is)
+ {
+     is->muted = !is->muted;
+@@ -1450,6 +1623,7 @@
+ {
+     is->audio_volume = av_clip(is->audio_volume + sign * step, 0, SDL_MIX_MAXVOLUME);
+ }
++#endif
+ 
+ static void step_to_next_frame(VideoState *is)
+ {
+@@ -1504,7 +1678,9 @@
+ static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial) {
+     /* update current video pts */
+     set_clock(&is->vidclk, pts, serial);
++#ifdef EXTCLOCK
+     sync_clock_to_slave(&is->extclk, &is->vidclk);
++#endif
+ }
+ 
+ /* called to display each frame */
+@@ -1513,11 +1689,16 @@
+     VideoState *is = opaque;
+     double time;
+ 
++#ifdef SUBTITLE
+     Frame *sp, *sp2;
++#endif
+ 
++#ifdef EXTCLOCK
+     if (!is->paused && get_master_sync_type(is) == AV_SYNC_EXTERNAL_CLOCK && is->realtime)
+         check_external_clock_speed(is);
++#endif
+ 
++#ifdef AUDIO
+     if (!display_disable && is->show_mode != SHOW_MODE_VIDEO && is->audio_st) {
+         time = av_gettime_relative() / 1000000.0;
+         if (is->force_refresh || is->last_vis_time + rdftspeed < time) {
+@@ -1526,6 +1707,7 @@
+         }
+         *remaining_time = FFMIN(*remaining_time, is->last_vis_time + rdftspeed - time);
+     }
++#endif
+ 
+     if (is->video_st) {
+         int redisplay = 0;
+@@ -1579,15 +1761,22 @@
+             if (frame_queue_nb_remaining(&is->pictq) > 1) {
+                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
+                 duration = vp_duration(is, vp, nextvp);
+-                if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration){
++                if(!is->step && (redisplay
++#ifdef FRAMEDROP
++                                 || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)
++#endif
++                                 ) && time > is->frame_timer + duration){
++#ifdef FRAMEDROP
+                     if (!redisplay)
+                         is->frame_drops_late++;
++#endif
+                     frame_queue_next(&is->pictq);
+                     redisplay = 0;
+                     goto retry;
+                 }
+             }
+ 
++#ifdef SUBTITLE
+             if (is->subtitle_st) {
+                     while (frame_queue_nb_remaining(&is->subpq) > 0) {
+                         sp = frame_queue_peek(&is->subpq);
+@@ -1607,6 +1796,7 @@
+                         }
+                     }
+             }
++#endif
+ 
+ display:
+             /* display picture */
+@@ -1631,25 +1821,42 @@
+             aqsize = 0;
+             vqsize = 0;
+             sqsize = 0;
++#ifdef AUDIO
+             if (is->audio_st)
+                 aqsize = is->audioq.size;
++#endif
+             if (is->video_st)
+                 vqsize = is->videoq.size;
++#ifdef SUBTITLE
+             if (is->subtitle_st)
+                 sqsize = is->subtitleq.size;
++#endif
+             av_diff = 0;
++#ifdef AUDIO
+             if (is->audio_st && is->video_st)
+                 av_diff = get_clock(&is->audclk) - get_clock(&is->vidclk);
+-            else if (is->video_st)
++            else
++#endif
++                if (is->video_st)
+                 av_diff = get_master_clock(is) - get_clock(&is->vidclk);
++#ifdef AUDIO
+             else if (is->audio_st)
+                 av_diff = get_master_clock(is) - get_clock(&is->audclk);
++#endif
+             av_log(NULL, AV_LOG_INFO,
+                    "%7.2f %s:%7.3f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
+                    get_master_clock(is),
++#ifdef AUDIO
+                    (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")),
++#else
++                   is->video_st ? "M-V" : "   ",
++#endif
+                    av_diff,
++#ifdef FRAMEDROP
+                    is->frame_drops_early + is->frame_drops_late,
++#else
++                   0,
++#endif
+                    aqsize / 1024,
+                    vqsize / 1024,
+                    sqsize,
+@@ -1837,6 +2044,7 @@
+         is->viddec_width  = frame->width;
+         is->viddec_height = frame->height;
+ 
++#ifdef FRAMEDROP
+         if (framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) {
+             if (frame->pts != AV_NOPTS_VALUE) {
+                 double diff = dpts - get_master_clock(is);
+@@ -1850,6 +2058,7 @@
+                 }
+             }
+         }
++#endif
+     }
+ 
+     return got_picture;
+@@ -1995,6 +2204,7 @@
+     return ret;
+ }
+ 
++#ifdef AUDIO
+ static int configure_audio_filters(VideoState *is, const char *afilters, int force_output_format)
+ {
+     static const enum AVSampleFormat sample_fmts[] = { AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
+@@ -2070,8 +2280,10 @@
+         avfilter_graph_free(&is->agraph);
+     return ret;
+ }
++#endif
+ #endif  /* CONFIG_AVFILTER */
+ 
++#ifdef AUDIO
+ static int audio_thread(void *arg)
+ {
+     VideoState *is = arg;
+@@ -2158,6 +2370,7 @@
+     av_frame_free(&frame);
+     return ret;
+ }
++#endif
+ 
+ static int decoder_start(Decoder *d, int (*fn)(void *), void *arg)
+ {
+@@ -2279,6 +2492,7 @@
+     return 0;
+ }
+ 
++#ifdef SUBTITLE
+ static int subtitle_thread(void *arg)
+ {
+     VideoState *is = arg;
+@@ -2346,7 +2560,9 @@
+     }
+     return 0;
+ }
++#endif
+ 
++#ifdef AUDIO
+ /* copy samples for viewing in editor window */
+ static void update_sample_display(VideoState *is, short *samples, int samples_size)
+ {
+@@ -2568,7 +2784,9 @@
+     /* Let's assume the audio driver that is used by SDL has two periods. */
+     if (!isnan(is->audio_clock)) {
+         set_clock_at(&is->audclk, is->audio_clock - (double)(2 * is->audio_hw_buf_size + is->audio_write_buf_size) / is->audio_tgt.bytes_per_sec, is->audio_clock_serial, audio_callback_time / 1000000.0);
++#ifdef EXTCLOCK
+         sync_clock_to_slave(&is->extclk, &is->audclk);
++#endif
+     }
+ }
+ 
+@@ -2644,6 +2862,7 @@
+     }
+     return spec.size;
+ }
++#endif
+ 
+ /* open a given stream. Return 0 if OK */
+ static int stream_component_open(VideoState *is, int stream_index)
+@@ -2654,8 +2873,10 @@
+     const char *forced_codec_name = NULL;
+     AVDictionary *opts;
+     AVDictionaryEntry *t = NULL;
++#ifdef AUDIO
+     int sample_rate, nb_channels;
+     int64_t channel_layout;
++#endif
+     int ret = 0;
+     int stream_lowres = lowres;
+ 
+@@ -2666,9 +2887,15 @@
+     codec = avcodec_find_decoder(avctx->codec_id);
+ 
+     switch(avctx->codec_type){
++#ifdef AUDIO
+         case AVMEDIA_TYPE_AUDIO   : is->last_audio_stream    = stream_index; forced_codec_name =    audio_codec_name; break;
++#endif
++#ifdef SUBTITLE
+         case AVMEDIA_TYPE_SUBTITLE: is->last_subtitle_stream = stream_index; forced_codec_name = subtitle_codec_name; break;
++#endif
+         case AVMEDIA_TYPE_VIDEO   : is->last_video_stream    = stream_index; forced_codec_name =    video_codec_name; break;
++        default:
++            break;
+     }
+     if (forced_codec_name)
+         codec = avcodec_find_decoder_by_name(forced_codec_name);
+@@ -2717,6 +2944,7 @@
+     is->eof = 0;
+     ic->streams[stream_index]->discard = AVDISCARD_DEFAULT;
+     switch (avctx->codec_type) {
++#ifdef AUDIO
+     case AVMEDIA_TYPE_AUDIO:
+ #if CONFIG_AVFILTER
+         {
+@@ -2766,6 +2994,7 @@
+             goto fail;
+         SDL_PauseAudio(0);
+         break;
++#endif
+     case AVMEDIA_TYPE_VIDEO:
+         is->video_stream = stream_index;
+         is->video_st = ic->streams[stream_index];
+@@ -2778,6 +3007,7 @@
+             goto fail;
+         is->queue_attachments_req = 1;
+         break;
++#ifdef SUBTITLE
+     case AVMEDIA_TYPE_SUBTITLE:
+         is->subtitle_stream = stream_index;
+         is->subtitle_st = ic->streams[stream_index];
+@@ -2786,6 +3016,7 @@
+         if ((ret = decoder_start(&is->subdec, subtitle_thread, is)) < 0)
+             goto fail;
+         break;
++#endif
+     default:
+         break;
+     }
+@@ -2843,8 +3074,12 @@
+ 
+     memset(st_index, -1, sizeof(st_index));
+     is->last_video_stream = is->video_stream = -1;
++#ifdef AUDIO
+     is->last_audio_stream = is->audio_stream = -1;
++#endif
++#ifdef SUBTITLE
+     is->last_subtitle_stream = is->subtitle_stream = -1;
++#endif
+     is->eof = 0;
+ 
+     ic = avformat_alloc_context();
+@@ -2946,12 +3181,15 @@
+         st_index[AVMEDIA_TYPE_VIDEO] =
+             av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO,
+                                 st_index[AVMEDIA_TYPE_VIDEO], -1, NULL, 0);
++#ifdef AUDIO
+     if (!audio_disable)
+         st_index[AVMEDIA_TYPE_AUDIO] =
+             av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO,
+                                 st_index[AVMEDIA_TYPE_AUDIO],
+                                 st_index[AVMEDIA_TYPE_VIDEO],
+                                 NULL, 0);
++#endif
++#ifdef SUBTITLE
+     if (!video_disable && !subtitle_disable)
+         st_index[AVMEDIA_TYPE_SUBTITLE] =
+             av_find_best_stream(ic, AVMEDIA_TYPE_SUBTITLE,
+@@ -2960,6 +3198,7 @@
+                                  st_index[AVMEDIA_TYPE_AUDIO] :
+                                  st_index[AVMEDIA_TYPE_VIDEO]),
+                                 NULL, 0);
++#endif
+ 
+     is->show_mode = show_mode;
+     if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
+@@ -2971,22 +3210,35 @@
+     }
+ 
+     /* open the streams */
++#ifdef AUDIO
+     if (st_index[AVMEDIA_TYPE_AUDIO] >= 0) {
+         stream_component_open(is, st_index[AVMEDIA_TYPE_AUDIO]);
+     }
++#endif
+ 
+     ret = -1;
+     if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
+         ret = stream_component_open(is, st_index[AVMEDIA_TYPE_VIDEO]);
+     }
++#ifdef AUDIO
+     if (is->show_mode == SHOW_MODE_NONE)
+         is->show_mode = ret >= 0 ? SHOW_MODE_VIDEO : SHOW_MODE_RDFT;
++#else
++    if (is->show_mode == SHOW_MODE_NONE && ret >= 0)
++        is->show_mode = SHOW_MODE_VIDEO;
++#endif
+ 
++#ifdef SUBTITLE
+     if (st_index[AVMEDIA_TYPE_SUBTITLE] >= 0) {
+         stream_component_open(is, st_index[AVMEDIA_TYPE_SUBTITLE]);
+     }
++#endif
+ 
+-    if (is->video_stream < 0 && is->audio_stream < 0) {
++    if (is->video_stream < 0
++#ifdef AUDIO
++        && is->audio_stream < 0
++#endif
++        ) {
+         av_log(NULL, AV_LOG_FATAL, "Failed to open file '%s' or configure filtergraph\n",
+                is->filename);
+         ret = -1;
+@@ -3028,23 +3280,29 @@
+                 av_log(NULL, AV_LOG_ERROR,
+                        "%s: error while seeking\n", is->ic->filename);
+             } else {
++#ifdef AUDIO
+                 if (is->audio_stream >= 0) {
+                     packet_queue_flush(&is->audioq);
+                     packet_queue_put(&is->audioq, &flush_pkt);
+                 }
++#endif
++#ifdef SUBTITLE
+                 if (is->subtitle_stream >= 0) {
+                     packet_queue_flush(&is->subtitleq);
+                     packet_queue_put(&is->subtitleq, &flush_pkt);
+                 }
++#endif
+                 if (is->video_stream >= 0) {
+                     packet_queue_flush(&is->videoq);
+                     packet_queue_put(&is->videoq, &flush_pkt);
+                 }
++#ifdef EXTCLOCK
+                 if (is->seek_flags & AVSEEK_FLAG_BYTE) {
+                    set_clock(&is->extclk, NAN, 0);
+                 } else {
+                    set_clock(&is->extclk, seek_target / (double)AV_TIME_BASE, 0);
+                 }
++#endif
+             }
+             is->seek_req = 0;
+             is->queue_attachments_req = 1;
+@@ -3065,11 +3323,26 @@
+ 
+         /* if the queue are full, no need to read more */
+         if (infinite_buffer<1 &&
+-              (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE
+-            || (   (is->audioq   .nb_packets > MIN_FRAMES || is->audio_stream < 0 || is->audioq.abort_request)
+-                && (is->videoq   .nb_packets > MIN_FRAMES || is->video_stream < 0 || is->videoq.abort_request
++              (
++#ifdef AUDIO
++                  is->audioq.size +
++#endif
++                  is->videoq.size
++#ifdef SUBTITLE
++                  + is->subtitleq.size
++#endif
++                  > MAX_QUEUE_SIZE
++            || (
++#ifdef AUDIO
++                   (is->audioq   .nb_packets > MIN_FRAMES || is->audio_stream < 0 || is->audioq.abort_request)
++                &&
++#endif
++                   (is->videoq   .nb_packets > MIN_FRAMES || is->video_stream < 0 || is->videoq.abort_request
+                     || (is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC))
+-                && (is->subtitleq.nb_packets > MIN_FRAMES || is->subtitle_stream < 0 || is->subtitleq.abort_request)))) {
++#ifdef SUBTITLE
++                && (is->subtitleq.nb_packets > MIN_FRAMES || is->subtitle_stream < 0 || is->subtitleq.abort_request)
++#endif
++                ))) {
+             /* wait 10 ms */
+             SDL_LockMutex(wait_mutex);
+             SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+@@ -3077,7 +3350,9 @@
+             continue;
+         }
+         if (!is->paused &&
++#ifdef AUDIO
+             (!is->audio_st || (is->auddec.finished == is->audioq.serial && frame_queue_nb_remaining(&is->sampq) == 0)) &&
++#endif
+             (!is->video_st || (is->viddec.finished == is->videoq.serial && frame_queue_nb_remaining(&is->pictq) == 0))) {
+             if (loop != 1 && (!loop || --loop)) {
+                 stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
+@@ -3091,10 +3366,14 @@
+             if ((ret == AVERROR_EOF || avio_feof(ic->pb)) && !is->eof) {
+                 if (is->video_stream >= 0)
+                     packet_queue_put_nullpacket(&is->videoq, is->video_stream);
++#ifdef AUDIO
+                 if (is->audio_stream >= 0)
+                     packet_queue_put_nullpacket(&is->audioq, is->audio_stream);
++#endif
++#ifdef SUBTITLE
+                 if (is->subtitle_stream >= 0)
+                     packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
++#endif
+                 is->eof = 1;
+             }
+             if (ic->pb && ic->pb->error)
+@@ -3114,13 +3393,18 @@
+                 av_q2d(ic->streams[pkt->stream_index]->time_base) -
+                 (double)(start_time != AV_NOPTS_VALUE ? start_time : 0) / 1000000
+                 <= ((double)duration / 1000000);
++#ifdef AUDIO
+         if (pkt->stream_index == is->audio_stream && pkt_in_play_range) {
+             packet_queue_put(&is->audioq, pkt);
+-        } else if (pkt->stream_index == is->video_stream && pkt_in_play_range
++        } else
++#endif
++        if (pkt->stream_index == is->video_stream && pkt_in_play_range
+                    && !(is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+             packet_queue_put(&is->videoq, pkt);
++#ifdef SUBTITLE
+         } else if (pkt->stream_index == is->subtitle_stream && pkt_in_play_range) {
+             packet_queue_put(&is->subtitleq, pkt);
++#endif
+         } else {
+             av_packet_unref(pkt);
+         }
+@@ -3159,14 +3443,23 @@
+     /* start video display */
+     if (frame_queue_init(&is->pictq, &is->videoq, VIDEO_PICTURE_QUEUE_SIZE, 1) < 0)
+         goto fail;
++#ifdef SUBTITLE
+     if (frame_queue_init(&is->subpq, &is->subtitleq, SUBPICTURE_QUEUE_SIZE, 0) < 0)
+         goto fail;
++#endif
++#ifdef AUDIO
+     if (frame_queue_init(&is->sampq, &is->audioq, SAMPLE_QUEUE_SIZE, 1) < 0)
+         goto fail;
++#endif
+ 
+-    if (packet_queue_init(&is->videoq) < 0 ||
+-        packet_queue_init(&is->audioq) < 0 ||
+-        packet_queue_init(&is->subtitleq) < 0)
++    if (packet_queue_init(&is->videoq) < 0
++#ifdef AUDIO
++        || packet_queue_init(&is->audioq) < 0
++#endif
++#ifdef SUBTITLE
++        || packet_queue_init(&is->subtitleq) < 0
++#endif
++        )
+         goto fail;
+ 
+     if (!(is->continue_read_thread = SDL_CreateCond())) {
+@@ -3175,11 +3468,17 @@
+     }
+ 
+     init_clock(&is->vidclk, &is->videoq.serial);
++#ifdef AUDIO
+     init_clock(&is->audclk, &is->audioq.serial);
++#endif
++#ifdef EXTCLOCK
+     init_clock(&is->extclk, &is->extclk.serial);
++#endif
++#ifdef AUDIO
+     is->audio_clock_serial = -1;
+     is->audio_volume = SDL_MIX_MAXVOLUME;
+     is->muted = 0;
++#endif
+     is->av_sync_type = av_sync_type;
+     is->read_tid     = SDL_CreateThread(read_thread, is);
+     if (!is->read_tid) {
+@@ -3194,8 +3493,8 @@
+ static void stream_cycle_channel(VideoState *is, int codec_type)
+ {
+     AVFormatContext *ic = is->ic;
+-    int start_index, stream_index;
+-    int old_index;
++    int start_index = -1, stream_index;
++    int old_index = -1;
+     AVStream *st;
+     AVProgram *p = NULL;
+     int nb_streams = is->ic->nb_streams;
+@@ -3203,12 +3502,16 @@
+     if (codec_type == AVMEDIA_TYPE_VIDEO) {
+         start_index = is->last_video_stream;
+         old_index = is->video_stream;
++#ifdef AUDIO
+     } else if (codec_type == AVMEDIA_TYPE_AUDIO) {
+         start_index = is->last_audio_stream;
+         old_index = is->audio_stream;
++#endif
++#ifdef SUBTITLE
+     } else {
+         start_index = is->last_subtitle_stream;
+         old_index = is->subtitle_stream;
++#endif
+     }
+     stream_index = start_index;
+ 
+@@ -3228,12 +3531,14 @@
+     for (;;) {
+         if (++stream_index >= nb_streams)
+         {
++#ifdef SUBTITLE
+             if (codec_type == AVMEDIA_TYPE_SUBTITLE)
+             {
+                 stream_index = -1;
+                 is->last_subtitle_stream = -1;
+                 goto the_end;
+             }
++#endif
+             if (start_index == -1)
+                 return;
+             stream_index = 0;
+@@ -3244,13 +3549,17 @@
+         if (st->codec->codec_type == codec_type) {
+             /* check that parameters are OK */
+             switch (codec_type) {
++#ifdef AUDIO
+             case AVMEDIA_TYPE_AUDIO:
+                 if (st->codec->sample_rate != 0 &&
+                     st->codec->channels != 0)
+                     goto the_end;
+                 break;
++#endif
+             case AVMEDIA_TYPE_VIDEO:
++#ifdef SUBTITLE
+             case AVMEDIA_TYPE_SUBTITLE:
++#endif
+                 goto the_end;
+             default:
+                 break;
+@@ -3260,12 +3569,15 @@
+  the_end:
+     if (p && stream_index != -1)
+         stream_index = p->stream_index[stream_index];
++    if (old_index == -1 && stream_index != -1)
+     av_log(NULL, AV_LOG_INFO, "Switch %s stream from #%d to #%d\n",
+            av_get_media_type_string(codec_type),
+            old_index,
+            stream_index);
+ 
++    if (old_index != -1)
+     stream_component_close(is, old_index);
++    if (stream_index != -1)
+     stream_component_open(is, stream_index);
+ }
+ 
+@@ -3282,6 +3594,7 @@
+     video_open(is, 1, NULL);
+ }
+ 
++#ifdef AUDIO
+ static void toggle_audio_display(VideoState *is)
+ {
+     int bgcolor = SDL_MapRGB(screen->format, 0x00, 0x00, 0x00);
+@@ -3297,6 +3610,7 @@
+         is->show_mode = next;
+     }
+ }
++#endif
+ 
+ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
+     double remaining_time = 0.0;
+@@ -3370,6 +3684,7 @@
+             case SDLK_SPACE:
+                 toggle_pause(cur_stream);
+                 break;
++#ifdef AUDIO
+             case SDLK_m:
+                 toggle_mute(cur_stream);
+                 break;
+@@ -3381,23 +3696,32 @@
+             case SDLK_9:
+                 update_volume(cur_stream, -1, SDL_VOLUME_STEP);
+                 break;
++#endif
+             case SDLK_s: // S: Step to next frame
+                 step_to_next_frame(cur_stream);
+                 break;
++#ifdef AUDIO                
+             case SDLK_a:
+                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
+                 break;
++#endif
+             case SDLK_v:
+                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
+                 break;
+             case SDLK_c:
+                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
++#ifdef AUDIO
+                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
++#endif
++#ifdef SUBTITLE
+                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
++#endif
+                 break;
++#ifdef SUBTITLE
+             case SDLK_t:
+                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
+                 break;
++#endif
+             case SDLK_w:
+ #if CONFIG_AVFILTER
+                 if (cur_stream->show_mode == SHOW_MODE_VIDEO && cur_stream->vfilter_idx < nb_vfilters - 1) {
+@@ -3405,11 +3729,15 @@
+                         cur_stream->vfilter_idx = 0;
+                 } else {
+                     cur_stream->vfilter_idx = 0;
++#ifdef AUDIO
+                     toggle_audio_display(cur_stream);
++#endif
+                 }
+ #else
++#ifdef AUDIO
+                 toggle_audio_display(cur_stream);
+ #endif
++#endif
+                 break;
+             case SDLK_PAGEUP:
+                 if (cur_stream->ic->nb_chapters <= 1) {
+@@ -3441,8 +3769,10 @@
+                         pos = -1;
+                         if (pos < 0 && cur_stream->video_stream >= 0)
+                             pos = frame_queue_last_pos(&cur_stream->pictq);
++#ifdef AUDIO                
+                         if (pos < 0 && cur_stream->audio_stream >= 0)
+                             pos = frame_queue_last_pos(&cur_stream->sampq);
++#endif
+                         if (pos < 0)
+                             pos = avio_tell(cur_stream->ic->pb);
+                         if (cur_stream->ic->bit_rate)
+@@ -3583,12 +3913,17 @@
+ 
+ static int opt_sync(void *optctx, const char *opt, const char *arg)
+ {
++#ifdef AUDIO                
+     if (!strcmp(arg, "audio"))
+         av_sync_type = AV_SYNC_AUDIO_MASTER;
+-    else if (!strcmp(arg, "video"))
++    else
++#endif
++        if (!strcmp(arg, "video"))
+         av_sync_type = AV_SYNC_VIDEO_MASTER;
++#ifdef EXTCLOCK
+     else if (!strcmp(arg, "ext"))
+         av_sync_type = AV_SYNC_EXTERNAL_CLOCK;
++#endif
+     else {
+         av_log(NULL, AV_LOG_ERROR, "Unknown value for %s: %s\n", opt, arg);
+         exit(1);
+@@ -3611,8 +3946,10 @@
+ static int opt_show_mode(void *optctx, const char *opt, const char *arg)
+ {
+     show_mode = !strcmp(arg, "video") ? SHOW_MODE_VIDEO :
++#ifdef AUDIO                
+                 !strcmp(arg, "waves") ? SHOW_MODE_WAVES :
+                 !strcmp(arg, "rdft" ) ? SHOW_MODE_RDFT  :
++#endif
+                 parse_number_or_die(opt, arg, OPT_INT, 0, SHOW_MODE_NB-1);
+     return 0;
+ }
+@@ -3641,8 +3978,12 @@
+    }
+    spec++;
+    switch (spec[0]) {
++#ifdef AUDIO                
+    case 'a' :    audio_codec_name = arg; break;
++#endif
++#ifdef SUBTITLE
+    case 's' : subtitle_codec_name = arg; break;
++#endif
+    case 'v' :    video_codec_name = arg; break;
+    default:
+        av_log(NULL, AV_LOG_ERROR,
+@@ -3660,12 +4001,20 @@
+     { "y", HAS_ARG, { .func_arg = opt_height }, "force displayed height", "height" },
+     { "s", HAS_ARG | OPT_VIDEO, { .func_arg = opt_frame_size }, "set frame size (WxH or abbreviation)", "size" },
+     { "fs", OPT_BOOL, { &is_full_screen }, "force full screen" },
++#ifdef AUDIO                
+     { "an", OPT_BOOL, { &audio_disable }, "disable audio" },
++#endif
+     { "vn", OPT_BOOL, { &video_disable }, "disable video" },
++#ifdef SUBTITLE
+     { "sn", OPT_BOOL, { &subtitle_disable }, "disable subtitling" },
++#endif
++#ifdef AUDIO                
+     { "ast", OPT_STRING | HAS_ARG | OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_AUDIO] }, "select desired audio stream", "stream_specifier" },
++#endif
+     { "vst", OPT_STRING | HAS_ARG | OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_VIDEO] }, "select desired video stream", "stream_specifier" },
++#ifdef SUBTITLE
+     { "sst", OPT_STRING | HAS_ARG | OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE] }, "select desired subtitle stream", "stream_specifier" },
++#endif
+     { "ss", HAS_ARG, { .func_arg = opt_seek }, "seek to a given position in seconds", "pos" },
+     { "t", HAS_ARG, { .func_arg = opt_duration }, "play  \"duration\" seconds of audio/video", "duration" },
+     { "bytes", OPT_INT | HAS_ARG, { &seek_by_bytes }, "seek by bytes 0=off 1=on -1=auto", "val" },
+@@ -3682,20 +4031,30 @@
+     { "exitonkeydown", OPT_BOOL | OPT_EXPERT, { &exit_on_keydown }, "exit on key down", "" },
+     { "exitonmousedown", OPT_BOOL | OPT_EXPERT, { &exit_on_mousedown }, "exit on mouse down", "" },
+     { "loop", OPT_INT | HAS_ARG | OPT_EXPERT, { &loop }, "set number of times the playback shall be looped", "loop count" },
++#ifdef FRAMEDROP
+     { "framedrop", OPT_BOOL | OPT_EXPERT, { &framedrop }, "drop frames when cpu is too slow", "" },
++#endif
+     { "infbuf", OPT_BOOL | OPT_EXPERT, { &infinite_buffer }, "don't limit the input buffer size (useful with realtime streams)", "" },
+     { "window_title", OPT_STRING | HAS_ARG, { &window_title }, "set window title", "window title" },
+ #if CONFIG_AVFILTER
+     { "vf", OPT_EXPERT | HAS_ARG, { .func_arg = opt_add_vfilter }, "set video filters", "filter_graph" },
++#ifdef AUDIO                
+     { "af", OPT_STRING | HAS_ARG, { &afilters }, "set audio filters", "filter_graph" },
+ #endif
++#endif
++#ifdef AUDIO
+     { "rdftspeed", OPT_INT | HAS_ARG| OPT_AUDIO | OPT_EXPERT, { &rdftspeed }, "rdft speed", "msecs" },
++#endif
+     { "showmode", HAS_ARG, { .func_arg = opt_show_mode}, "select show mode (0 = video, 1 = waves, 2 = RDFT)", "mode" },
+     { "default", HAS_ARG | OPT_AUDIO | OPT_VIDEO | OPT_EXPERT, { .func_arg = opt_default }, "generic catch all option", "" },
+     { "i", OPT_BOOL, { &dummy}, "read specified file", "input_file"},
+     { "codec", HAS_ARG, { .func_arg = opt_codec}, "force decoder", "decoder_name" },
++#ifdef AUDIO
+     { "acodec", HAS_ARG | OPT_STRING | OPT_EXPERT, {    &audio_codec_name }, "force audio decoder",    "decoder_name" },
++#endif
++#ifdef SUBTITLE
+     { "scodec", HAS_ARG | OPT_STRING | OPT_EXPERT, { &subtitle_codec_name }, "force subtitle decoder", "decoder_name" },
++#endif
+     { "vcodec", HAS_ARG | OPT_STRING | OPT_EXPERT, {    &video_codec_name }, "force video decoder",    "decoder_name" },
+     { "autorotate", OPT_BOOL, { &autorotate }, "automatically rotate video", "" },
+     { NULL, },
+@@ -3726,12 +4085,16 @@
+            "q, ESC              quit\n"
+            "f                   toggle full screen\n"
+            "p, SPC              pause\n"
++#ifdef AUDIO
+            "m                   toggle mute\n"
+            "9, 0                decrease and increase volume respectively\n"
+            "/, *                decrease and increase volume respectively\n"
+            "a                   cycle audio channel in the current program\n"
++#endif
+            "v                   cycle video channel\n"
++#ifdef SUBTITLE
+            "t                   cycle subtitle channel in the current program\n"
++#endif
+            "c                   cycle program\n"
+            "w                   cycle video filters or show modes\n"
+            "s                   activate frame-step mode\n"
+@@ -3805,8 +4168,10 @@
+         video_disable = 1;
+     }
+     flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER;
++#ifdef AUDIO
+     if (audio_disable)
+         flags &= ~SDL_INIT_AUDIO;
++#endif
+     if (display_disable)
+         SDL_putenv(dummy_videodriver); /* For the event queue, we always need a video driver. */
+ #if !defined(_WIN32) && !defined(__APPLE__)
