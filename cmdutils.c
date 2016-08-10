@@ -42,7 +42,7 @@
 #define CONFIG_THIS_YEAR 2016
 #define FFMPEG_CONFIGURATION ""
 #define FFMPEG_DATADIR "/usr/local/share/ffmpeg"
-#define CC_IDENT "Apple LLVM version 7.0.2 (clang-700.1.81)"
+#define CC_IDENT "Apple LLVM version 7.3.0 (clang-703.0.31)"
 
 #include "compat/va_copy.h"
 #include "libavformat/avformat.h"
@@ -119,6 +119,15 @@ static void log_callback_report(void *ptr, int level, const char *fmt, va_list v
         fputs(line, report_file);
         fflush(report_file);
     }
+}
+
+void init_dynload(void)
+{
+#ifdef _WIN32
+    /* Calling SetDllDirectory with the empty string (but not NULL) removes the
+     * current working directory from the DLL search path as a security pre-caution. */
+    SetDllDirectory("");
+#endif
 }
 
 static void (*program_exit)(int ret);
