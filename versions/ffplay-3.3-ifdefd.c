@@ -788,10 +788,12 @@ static Frame *frame_queue_peek(FrameQueue *f)
     return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
 }
 
+#if defined(SUBTITLE) || defined(FRAMEDROP)
 static Frame *frame_queue_peek_next(FrameQueue *f)
 {
     return &f->queue[(f->rindex + f->rindex_shown + 1) % f->max_size];
 }
+#endif
 
 static Frame *frame_queue_peek_last(FrameQueue *f)
 {
@@ -882,6 +884,7 @@ static void decoder_abort(Decoder *d, FrameQueue *fq)
     packet_queue_flush(d->queue);
 }
 
+#ifdef AUDIO
 static inline void fill_rectangle(int x, int y, int w, int h)
 {
     SDL_Rect rect;
@@ -892,6 +895,7 @@ static inline void fill_rectangle(int x, int y, int w, int h)
     if (w && h)
         SDL_RenderFillRect(renderer, &rect);
 }
+#endif
 
 static int realloc_texture(SDL_Texture **texture, Uint32 new_format, int new_width, int new_height, SDL_BlendMode blendmode, int init_texture)
 {
@@ -1056,6 +1060,7 @@ static void video_image_display(VideoState *is)
     }
 
     SDL_RenderCopyEx(renderer, is->vid_texture, NULL, &rect, 0, NULL, vp->flip_v ? SDL_FLIP_VERTICAL : 0);
+#ifdef SUBTITLE
     if (sp) {
 #if USE_ONEPASS_SUBTITLE_RENDER
         SDL_RenderCopy(renderer, is->sub_texture, NULL, &rect);
@@ -1073,6 +1078,7 @@ static void video_image_display(VideoState *is)
         }
 #endif
     }
+#endif
 }
 
 #ifdef AUDIO
@@ -1331,12 +1337,16 @@ static void stream_close(VideoState *is)
     sws_freeContext(is->sub_convert_ctx);
 #endif
     av_free(is->filename);
+#ifdef AUDIO
     if (is->vis_texture)
         SDL_DestroyTexture(is->vis_texture);
+#endif
     if (is->vid_texture)
         SDL_DestroyTexture(is->vid_texture);
+#ifdef SUBTITLE
     if (is->sub_texture)
         SDL_DestroyTexture(is->sub_texture);
+#endif
     av_free(is);
 }
 
@@ -3704,10 +3714,12 @@ static void event_loop(VideoState *cur_stream)
                 case SDL_WINDOWEVENT_RESIZED:
                     screen_width  = cur_stream->width  = event.window.data1;
                     screen_height = cur_stream->height = event.window.data2;
+#ifdef AUDIO
                     if (cur_stream->vis_texture) {
                         SDL_DestroyTexture(cur_stream->vis_texture);
                         cur_stream->vis_texture = NULL;
                     }
+#endif
                 case SDL_WINDOWEVENT_EXPOSED:
                     cur_stream->force_refresh = 1;
             }

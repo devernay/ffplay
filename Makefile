@@ -26,9 +26,9 @@ FFMPEG_PKGS = libavformat libavcodec libavdevice libswscale libavfilter libswres
 FFMPEG_CPPFLAGS = $(shell pkg-config $(FFMPEG_PKGS) --cflags)
 FFMPEG_LDFLAGS = $(shell pkg-config $(FFMPEG_PKGS) --libs-only-L)
 FFMPEG_LIBS = $(shell pkg-config $(FFMPEG_PKGS) --libs-only-l)
-SDL_CPPFLAGS = $(shell sdl-config --cflags)
+SDL_CPPFLAGS = $(shell sdl2-config --cflags)
 SDL_LDFLAGS =
-SDL_LIBS = $(shell sdl-config --libs)
+SDL_LIBS = $(shell sdl2-config --libs)
 
 -include config$(CONFIG).mk
 
